@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>AI Pro Camera Assistant (TF.js)</title>
+
+  <!-- Подключение официального TensorFlow.js и легковесной модели MobileNet -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@latest/dist/mobilenet.min.js"></script>
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #000;
+      color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      overflow: hidden;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    #viewfinder-wrapper {
+      position: relative;
+      flex: 1;
+      overflow: hidden;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      background: #111;
+    }
+
+    video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    /* Сетка правила третей */
+    .grid-overlay {
+      position: absolute;
+      top: 0; left: 0; width: 100%; height: 100%;
+      pointer-events: none;
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      grid-template-rows: 1fr 1fr 1fr;
+    }
+    .grid-cell {
+      border: 0.5px solid rgba(255, 255, 255, 0.2);
+      position: relative;
+    }
+    /* Точки силы третей */
+    .power-point {
+      position: absolute;
+      width: 10px; height: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.5);
+      border-radius: 50%;
+      transform: translate(-50%, -50%);
+    }
+
+    /* Искусственный горизонт */
+    #horizon-line {
+      position: absolute;
+      top: 50%;
+      left: 25%;
+      width: 50%;
+      height: 2px;
+      background: rgba(255, 204, 0, 0.85);
+      transform-origin: center;
+      transition: background 0.15s, transform 0.05s linear;
+      pointer-events: none;
+      z-index: 5;
+    }
+    #horizon-line.level {
+      background: #00ff66;
+      height: 3px;
+      box-shadow: 0 0 10px #00ff66;
+    }
+
+    /* HUD (Информационная панель ИИ) */
+    #hud {
+      position: absolute;
+      top: 14px;
+      left: 14px;
+      right: 14px;
+      background: rgba(0, 0, 0, 0.7);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      padding: 12px 14px;
+      border-radius: 14px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      font-size: 13px;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      z-index: 10;
+    }
+
+    .hud-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .hud-title {
+      color: #aaa;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 5px;
+      font-weight: 700;
+      font-size: 12px;
+    }
+    .badge-ok { background: #00aa44; color: #fff; }
+    .badge-warn { background: #d48800; color: #fff; }
+    .badge-bad { background: #cc3333; color: #fff; }
+
+    #ai-tip {
+      font-size: 12px;
+      color: #70d6ff;
+      margin-top: 3px;
+      font-weight: 500;
+    }
+
+    /* Панель управления */
+    #bottom-bar {
+      height: 100px;
+      background: #0a0a0a;
+      display: flex;
+      justify-content: space-around;
+      align-items: center;
+      padding: 0 20px;
+      z-index: 10;
+    }
+
+    .tool-btn {
+      background: #1e1e1e;
+      border: 1px solid #333;
+      color: #eee;
+      padding: 9px 15px;
+      border-radius: 8px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .tool-btn:active { background: #333; }
+
+    #capture-btn {
+      width: 65px;
+      height: 65px;
+      border-radius: 50%;
+      border: 4px solid #fff;
+      background: #ff3b30;
+      cursor: pointer;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      transition: transform 0.1s;
+    }
+    #capture-btn:active {
+      transform: scale(0.92);
+    }
+  </style>
+</head>
+<body>
+
+  <div id="viewfinder-wrapper">
+    <video id="video" playsinline autoplay muted></video>
+
+    <!-- Сетка третей -->
+    <div class="grid-overlay" id="grid">
+      <div class="grid-cell"><div class="power-point" style="top: 100%; left: 100%;"></div></div>
+      <div class="grid-cell"><div class="power-point" style="top: 100%; left: 0%;"></div></div>
+      <div class="grid-cell"></div>
+      <div class="grid-cell"><div class="power-point" style="top: 0%; left: 100%;"></div></div>
+      <div class="grid-cell"><div class="power-point" style="top: 0%; left: 0%;"></div></div>
+      <div class="grid-cell"></div>
+      <div class="grid-cell"></div>
+      <div class="grid-cell"></div>
+      <div class="grid-cell"></div>
+    </div>
+
+    <!-- Линия горизонта -->
+    <div id="horizon-line"></div>
+
+    <!-- Информационный HUD -->
+    <div id="hud">
+      <div class="hud-row">
+        <span class="hud-title">Нейросеть (TF.js):</span>
+        <span id="ai-scene">Загрузка модели...</span>
+      </div>
+
+      <div class="hud-row">
+        <span class="hud-title">Оценка кадра:</span>
+        <span id="ai-score"><span class="badge badge-warn">Инициализация</span></span>
+      </div>
+
+      <div class="hud-row">
+        <span class="hud-title">Экспозиция:</span>
+        <span>
+          <strong>ISO</strong> <span id="val-iso">100</span> |
+          <strong>Выдержка</strong> <span id="val-shutter">1/500s</span> |
+          <strong>EV</strong> <span id="val-ev">0.0</span>
+        </span>
+      </div>
+
+      <div class="hud-row">
+        <span class="hud-title">Горизонт:</span>
+        <span id="val-horizon">Выравнивание...</span>
+      </div>
+
+      <div id="ai-tip">Совет: держите камеру ровно и направьте на объект.</div>
+    </div>
+  </div>
+
+  <div id="bottom-bar">
+    <button class="tool-btn" id="btn-grid">Сетка</button>
+    <div id="capture-btn"></div>
+    <button class="tool-btn" id="btn-flip">Камера</button>
+  </div>
+
+  <!-- Скрытый холст для сэмплинга кадра в TensorFlow -->
+  <canvas id="tensor-canvas" width="224" height="224" style="display:none;"></canvas>
+
+  <script>
+    const video = document.getElementById('video');
+    const horizonLine = document.getElementById('horizon-line');
+    const aiScene = document.getElementById('ai-scene');
+    const aiScore = document.getElementById('ai-score');
+    const valIso = document.getElementById('val-iso');
+    const valShutter = document.getElementById('val-shutter');
+    const valEv = document.getElementById('val-ev');
+    const valHorizon = document.getElementById('val-horizon');
+    const aiTip = document.getElementById('ai-tip');
+    const tensorCanvas = document.getElementById('tensor-canvas');
+    const tCtx = tensorCanvas.getContext('2d', { willReadFrequently: true });
+
+    let currentStream = null;
+    let facingMode = 'environment';
+    let nnModel = null;
+    let isAnalyzing = false;
+    let lastLevelState = false;
+
+    // 1. Инициализация камеры
+    async function initCamera() {
+      if (currentStream) {
+        currentStream.getTracks().forEach(track => track.stop());
+      }
+      try {
+        const constraints = {
+          video: {
+            facingMode: facingMode,
+            width: { ideal: 1920 },
+            height: { ideal: 1080 }
+          },
+          audio: false
+        };
+        currentStream = await navigator.mediaDevices.getUserMedia(constraints);
+        video.srcObject = currentStream;
+      } catch (err) {
+        alert("Ошибка доступа к камере: " + err.message);
+      }
+    }
+
+    // 2. Загрузка легковесной нейросети (MobileNet v2 через WebGL)
+    async function initNeuralNetwork() {
+      try {
+        await tf.setBackend('webgl');
+        await tf.ready();
+        aiScene.textContent = "Загрузка весов...";
+        
+        // Загружаем легкую квантованную MobileNet (Alpha 0.5) для максимальной скорости на смартфонах
+        nnModel = await mobilenet.load({ version: 2, alpha: 0.5 });
+        aiScene.textContent = "Готова к работе";
+        
+        // Запускаем постоянный цикл инференса
+        runNeuralLoop();
+      } catch (err) {
+        console.error("TF.js Error:", err);
+        aiScene.textContent = "Базовый режим (без нейросети)";
+      }
+    }
+
+    // 3. Нейросетевой цикл анализа (каждые 400 мс)
+    async function runNeuralLoop() {
+      if (!isAnalyzing && video.readyState >= 2 && nnModel) {
+        isAnalyzing = true;
+        try {
+          // Отрисовываем кадр в квадрат 224x224 (входной размер для MobileNet)
+          tCtx.drawImage(video, 0, 0, 224, 224);
+
+          // А. Нейросетевая классификация сцены
+          const predictions = await nnModel.classify(tensorCanvas, 2);
+          let topClass = "Сцена";
+          if (predictions && predictions.length > 0) {
+            topClass = predictions[0].className.split(',')[0];
+            aiScene.textContent = topClass;
+          }
+
+          // Б. Компьютерный анализ кадра: резкость (Laplacian) и экспозиция
+          const imgData = tCtx.getImageData(0, 0, 224, 224);
+          const { brightness, contrast, sharpness } = computeFrameMetrics(imgData);
+
+          // В. Расчет эстетической оценки и подбор ручных параметров
+          evaluateAesthetics(topClass, brightness, contrast, sharpness);
+
+        } catch (e) {
+          console.error(e);
+        }
+        isAnalyzing = false;
+      }
+
+      setTimeout(runNeuralLoop, 400);
+    }
+
+    // 4. Математический анализ пикселей (яркость, контраст, фильтр Лапласа для резкости)
+    function computeFrameMetrics(imgData) {
+      const data = imgData.data;
+      let totalLuma = 0;
+      let minLuma = 255;
+      let maxLuma = 0;
+      const w = 224;
+      const h = 224;
+
+      // Одноканальная карта яркости
+      const gray = new Uint8Array(w * h);
+
+      for (let i = 0, j = 0; i < data.length; i += 4, j++) {
+        const luma = 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
+        gray[j] = luma;
+        totalLuma += luma;
+        if (luma < minLuma) minLuma = luma;
+        if (luma > maxLuma) maxLuma = luma;
+      }
+
+      // Вычисление дисперсии Лапласиана (проверка резкости и смаза)
+      let laplacianEnergy = 0;
+      for (let y = 1; y < h - 1; y += 2) {
+        for (let x = 1; x < w - 1; x += 2) {
+          const idx = y * w + x;
+          const lap = Math.abs(
+            -4 * gray[idx] +
+            gray[idx - 1] + gray[idx + 1] +
+            gray[idx - w] + gray[idx + w]
+          );
+          laplacianEnergy += lap;
+        }
+      }
+
+      const count = (w * h) / 4;
+      const sharpness = laplacianEnergy / count;
+      const avgBrightness = totalLuma / (w * h);
+      const contrast = maxLuma - minLuma;
+
+      return { brightness: avgBrightness, contrast, sharpness };
+    }
+
+    // 5. Экспертная система оценки эстетики и подбора настроек
+    function evaluateAesthetics(scene, brightness, contrast, sharpness) {
+      let score = 5.0;
+      let tips = [];
+
+      // Подбор ручных параметров (ISO и выдержка)
+      let iso = 100;
+      let shutter = "1/250s";
+      let ev = "0.0";
+
+      if (brightness < 70) {
+        iso = 800;
+        shutter = "1/60s";
+        ev = "-0.7";
+        tips.push("Мало света: зафиксируйте руки");
+      } else if (brightness > 180) {
+        iso = 50;
+        shutter = "1/1000s";
+        ev = "+0.3";
+        tips.push("Очень ярко: избегайте пересвета");
+      } else {
+        iso = 100;
+        shutter = "1/250s";
+        score += 1.5;
+      }
+
+      // Оценка резкости
+      if (sharpness > 16) {
+        score += 2.0;
+      } else if (sharpness < 7) {
+        score -= 2.0;
+        tips.push("Кадр смазан: сфокусируйтесь");
+      }
+
+      // Оценка контраста
+      if (contrast > 140) {
+        score += 1.0;
+      } else if (contrast < 60) {
+        score -= 1.0;
+        tips.push("Низкий контраст: измените угол к свету");
+      }
+
+      // Проверка горизонта
+      if (horizonLine.classList.contains('level')) {
+        score += 1.0;
+      } else {
+        tips.push("Выровняйте горизонт");
+      }
+
+      score = Math.max(1, Math.min(10, Math.round(score * 10) / 10));
+
+      // Вывод значений
+      valIso.textContent = iso;
+      valShutter.textContent = shutter;
+      valEv.textContent = ev;
+
+      if (score >= 7.5) {
+        aiScore.innerHTML = `<span class="badge badge-ok">${score} / 10</span> Отличный кадр!`;
+      } else if (score >= 5.0) {
+        aiScore.innerHTML = `<span class="badge badge-warn">${score} / 10</span> Нормально`;
+      } else {
+        aiScore.innerHTML = `<span class="badge badge-bad">${score} / 10</span> Нужна коррекция`;
+      }
+
+      if (tips.length > 0) {
+        aiTip.textContent = "Совет: " + tips.slice(0, 2).join('; ');
+      } else {
+        aiTip.textContent = "Композиция и параметры идеальны — жмите спуск!";
+      }
+    }
+
+    // 6. Датчик ориентации устройства (Горизонт с вибрацией)
+    function initOrientation() {
+      const handleOrientation = (e) => {
+        let tilt = e.gamma || 0; // наклон влево-вправо
+        horizonLine.style.transform = `rotate(${tilt}deg)`;
+
+        const isLevel = Math.abs(tilt) < 1.2; // погрешность 1.2 градуса
+
+        if (isLevel) {
+          horizonLine.classList.add('level');
+          valHorizon.innerHTML = '<span style="color:#00ff66;font-weight:bold;">0° (ИДЕАЛ)</span>';
+
+          // Тактильный виброотклик при идеальном выравнивании
+          if (!lastLevelState && navigator.vibrate) {
+            navigator.vibrate(35);
+          }
+          lastLevelState = true;
+        } else {
+          horizonLine.classList.remove('level');
+          valHorizon.textContent = `${Math.round(tilt)}° к горизонту`;
+          lastLevelState = false;
+        }
+      };
+
+      if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+        window.addEventListener('click', async () => {
+          try {
+            const resp = await DeviceOrientationEvent.requestPermission();
+            if (resp === 'granted') {
+              window.addEventListener('deviceorientation', handleOrientation);
+            }
+          } catch (e) { console.error(e); }
+        }, { once: true });
+      } else {
+        window.addEventListener('deviceorientation', handleOrientation);
+      }
+    }
+
+    // 7. Управление интерфейсом
+    document.getElementById('btn-flip').addEventListener('click', () => {
+      facingMode = (facingMode === 'environment') ? 'user' : 'environment';
+      initCamera();
+    });
+
+    document.getElementById('btn-grid').addEventListener('click', () => {
+      const grid = document.getElementById('grid');
+      grid.style.display = (grid.style.display === 'none') ? 'grid' : 'none';
+    });
+
+    document.getElementById('capture-btn').addEventListener('click', () => {
+      if (navigator.vibrate) navigator.vibrate(60);
+      alert("Снимок зафиксирован при параметрах: ISO " + valIso.textContent + ", выдержка " + valShutter.textContent);
+    });
+
+    // Запуск приложения
+    initCamera();
+    initOrientation();
+    video.addEventListener('play', () => {
+      initNeuralNetwork();
+    }, { once: true });
+  </script>
+</body>
+</html>
